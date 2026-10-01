@@ -24,6 +24,8 @@ BUCKETS = [
 ]
 
 DEFAULT_TOKEN = "wr8+pHu3KYryzz0O2MaBSNUZbVLjLUYC1FR4sKqSW0oY+a9+FzLxNoG/EHc90mkqveCPM/FO45hW1wOhZ5oq8SDWLTEiGwtyL1JBDOZsmzxO0atH2CcxFrt0cEK3Z3KI8IiP35R836G8XBk+ksquBw=="
+DEFAULT_CONV_ID = "2105719632196911105"
+DEFAULT_PARENT_ID = "2105762809210978304"
 
 def grab_token(headless: bool = True, timeout: int = 30) -> str:
     print("[*] Launching stealth headless browser to harvest fresh token...")
@@ -51,9 +53,9 @@ def grab_token(headless: bool = True, timeout: int = 30) -> str:
         ctx.add_init_script("delete Object.getPrototypeOf(navigator).webdriver")
         page = ctx.new_page()
 
-        # Block heavy images, fonts, stylesheets, and media to save memory on Render Free tier
+        # Block heavy images, media, and fonts to save RAM on Render 512MB limit (allow stylesheets for React layout)
         def block_assets(route):
-            if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+            if route.request.resource_type in ["image", "media", "font"]:
                 route.abort()
             else:
                 route.continue_()
@@ -66,7 +68,11 @@ def grab_token(headless: bool = True, timeout: int = 30) -> str:
                     tok = body.get("token", "")
                     if tok and "token" not in captured:
                         captured["token"] = tok
-                        print(f"[+] Fresh Token Intercepted!")
+                        captured["conv_id"] = body.get("conversationId", "")
+                        msgs = body.get("messages", [])
+                        if msgs:
+                            captured["parent_id"] = msgs[0].get("parentId", "")
+                        print(f"[+] Fresh Token & Conversation Intercepted!")
                 except Exception:
                     pass
 
@@ -110,10 +116,11 @@ def grab_token(headless: bool = True, timeout: int = 30) -> str:
 
     if "token" not in captured:
         raise RuntimeError("Failed to intercept token automatically.")
-    return captured["token"]
-
-def new_conv_id() -> str:
-    return (str(int(time.time() * 1000)) + str(uuid.uuid4().int)[:6])[:19]
+    return (
+        captured["token"],
+        captured.get("conv_id") or DEFAULT_CONV_ID,
+        captured.get("parent_id") or DEFAULT_PARENT_ID
+    )
 
 def make_session(token: str, bucket: dict) -> requests.Session:
     s = requests.Session()
@@ -142,6 +149,8 @@ class MetasoCore:
     def _init_client(self, force_refresh: bool = False):
         token = "" if force_refresh else (os.getenv("METASO_TOKEN", "").strip() or DEFAULT_TOKEN)
         cache_path = os.path.join(os.environ.get("TEMP", "/tmp"), "metaso_token.txt")
+        conv_id = DEFAULT_CONV_ID
+        parent_id = DEFAULT_PARENT_ID
         
         if not token and not force_refresh and os.path.exists(cache_path):
             try:
@@ -154,7 +163,7 @@ class MetasoCore:
                 pass
 
         if not token:
-            token = grab_token(headless=self.headless)
+            token, conv_id, parent_id = grab_token(headless=self.headless)
             try:
                 with open(cache_path, "w", encoding="utf-8") as f:
                     f.write(token)
@@ -165,10 +174,8 @@ class MetasoCore:
         self.sessions = [make_session(self.token, b) for b in BUCKETS]
         self.exhausted = [False] * len(BUCKETS)
         self.current = 0
-        cid = new_conv_id()
-        pid = str(int(cid) - 1)
-        self.conv_ids = [cid] * len(BUCKETS)
-        self.parent_ids = [pid] * len(BUCKETS)
+        self.conv_ids = [conv_id] * len(BUCKETS)
+        self.parent_ids = [parent_id] * len(BUCKETS)
 
     def _rotate(self):
         for i in range(len(BUCKETS)):
@@ -270,7 +277,7 @@ class MetasoCore:
                 if nxt == -1:
                     print("[*] All buckets dry. Refreshing token...")
                     try:
-                        self._init_client()
+                        self._init_client(force_refresh=True)
                         attempts = 0
                         continue
                     except:
