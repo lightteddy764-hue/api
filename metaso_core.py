@@ -23,13 +23,22 @@ BUCKETS = [
     },
 ]
 
+DEFAULT_TOKEN = "wr8+pHu3KYryzz0O2MaBSNUZbVLjLUYC1FR4sKqSW0oY+a9+FzLxNoG/EHc90mkqveCPM/FO45hW1wOhZ5oq8SDWLTEiGwtyL1JBDOZsmzxO0atH2CcxFrt0cEK3Z3KI8IiP35R836G8XBk+ksquBw=="
+
 def grab_token(headless: bool = True, timeout: int = 30) -> str:
     print("[*] Launching stealth headless browser to harvest fresh token...")
     captured = {}
     with sync_playwright() as p:
         browser = p.chromium.launch(
             headless=headless,
-            args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
+            args=[
+                '--disable-blink-features=AutomationControlled',
+                '--no-sandbox',
+                '--disable-dev-shm-usage',
+                '--disable-gpu',
+                '--single-process',
+                '--no-zygote',
+            ]
         )
         ctx = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
@@ -118,7 +127,7 @@ class MetasoCore:
         self._init_client()
 
     def _init_client(self, force_refresh: bool = False):
-        token = "" if force_refresh else os.getenv("METASO_TOKEN", "").strip()
+        token = "" if force_refresh else (os.getenv("METASO_TOKEN", "").strip() or DEFAULT_TOKEN)
         cache_path = os.path.join(os.environ.get("TEMP", "/tmp"), "metaso_token.txt")
         
         if not token and not force_refresh and os.path.exists(cache_path):
@@ -164,7 +173,7 @@ class MetasoCore:
             pid = self.parent_ids[self.current]
 
             payload = {
-                "model": "metaso-qa-with-agent", "stream": True,
+                "model": "fast_thinking", "stream": True,
                 "messages": [{
                     "id": f"temp-{uuid.uuid4()}", "key": f"temp-{uuid.uuid4()}",
                     "conversationId": cid, "role": "user",
@@ -184,7 +193,13 @@ class MetasoCore:
             }
 
             try:
-                r = ses.post(CHAT_EP, json=payload, stream=True, timeout=90)
+                r = ses.post(
+                    CHAT_EP,
+                    headers={"Accept": "text/event-stream", "Content-Type": "application/json"},
+                    json=payload,
+                    stream=True,
+                    timeout=90
+                )
             except Exception as e:
                 print(f"[!] Network error: {e}")
                 attempts += 1

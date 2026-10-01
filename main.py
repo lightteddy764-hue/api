@@ -58,10 +58,6 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
 
-@app.on_event("startup")
-def startup_event():
-    # Pre-warm the client on background startup
-    threading.Thread(target=get_client_sync, daemon=True).start()
 
 def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     """Format conversation turns to preserve multi-turn context."""
