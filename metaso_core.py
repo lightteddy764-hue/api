@@ -1,4 +1,4 @@
-import json, time, uuid, sys
+import json, time, uuid, sys, os
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -117,8 +117,29 @@ class MetasoCore:
         self.parent_ids = []
         self._init_client()
 
-    def _init_client(self):
-        self.token = grab_token(headless=self.headless)
+    def _init_client(self, force_refresh: bool = False):
+        token = "" if force_refresh else os.getenv("METASO_TOKEN", "").strip()
+        cache_path = os.path.join(os.environ.get("TEMP", "/tmp"), "metaso_token.txt")
+        
+        if not token and not force_refresh and os.path.exists(cache_path):
+            try:
+                with open(cache_path, "r", encoding="utf-8") as f:
+                    cached = f.read().strip()
+                    if cached:
+                        token = cached
+                        print("[*] Reusing cached Metaso token.")
+            except Exception:
+                pass
+
+        if not token:
+            token = grab_token(headless=self.headless)
+            try:
+                with open(cache_path, "w", encoding="utf-8") as f:
+                    f.write(token)
+            except Exception:
+                pass
+
+        self.token = token
         self.sessions = [make_session(self.token, b) for b in BUCKETS]
         self.exhausted = [False] * len(BUCKETS)
         self.current = 0
