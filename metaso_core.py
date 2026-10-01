@@ -1,0 +1,232 @@
+import json, time, uuid, sys
+import requests
+from playwright.sync_api import sync_playwright
+
+BASE_URL = "https://metaso.cn"
+CHAT_EP  = f"{BASE_URL}/api/search/chat"
+
+BUCKETS = [
+    {
+        "name":   "h5-iphone",
+        "header": ("metaso-h5", "h5"),
+        "ua":     "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+    },
+    {
+        "name":   "app-android",
+        "header": ("metaso-app", "app"),
+        "ua":     "Mozilla/5.0 (Linux; Android 14; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+    },
+    {
+        "name":   "aliapp-android",
+        "header": ("metaso-aliapp", "aliapp"),
+        "ua":     "Mozilla/5.0 (Linux; Android 14; SM-G998B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/153.0.0.0 Mobile Safari/537.36",
+    },
+]
+
+def grab_token(headless: bool = True, timeout: int = 30) -> str:
+    print("[*] Launching stealth headless browser to harvest fresh token...")
+    captured = {}
+    with sync_playwright() as p:
+        browser = p.chromium.launch(
+            headless=headless,
+            args=['--disable-blink-features=AutomationControlled', '--no-sandbox', '--disable-dev-shm-usage']
+        )
+        ctx = browser.new_context(
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800}
+        )
+        ctx.add_init_script("delete Object.getPrototypeOf(navigator).webdriver")
+        page = ctx.new_page()
+
+        def on_req(req):
+            if "/api/search/chat" in req.url and req.method == "POST":
+                try:
+                    body = json.loads(req.post_data or "{}")
+                    tok = body.get("token", "")
+                    if tok and "token" not in captured:
+                        captured["token"] = tok
+                        print(f"[+] Fresh Token Intercepted!")
+                except Exception:
+                    pass
+
+        page.on("request", on_req)
+        try:
+            page.goto(BASE_URL, wait_until="commit", timeout=20000)
+        except Exception:
+            pass
+        time.sleep(3)
+
+        try:
+            ta = page.locator("textarea").first
+            ta.click(timeout=5000)
+            time.sleep(0.3)
+            ta.fill("hello")
+            time.sleep(0.5)
+            btn = page.locator("button:has(svg)").last
+            if btn.count() > 0:
+                btn.click(timeout=3000)
+            else:
+                page.mouse.click(1074, 474)
+        except Exception as e:
+            print(f"[!] Error interacting with page: {e}")
+
+        for _ in range(timeout * 2):
+            if "token" in captured:
+                break
+            time.sleep(0.5)
+        browser.close()
+
+    if "token" not in captured:
+        raise RuntimeError("Failed to intercept token automatically.")
+    return captured["token"]
+
+def new_conv_id() -> str:
+    return (str(int(time.time() * 1000)) + str(uuid.uuid4().int)[:6])[:19]
+
+def make_session(token: str, bucket: dict) -> requests.Session:
+    s = requests.Session()
+    hk, hv = bucket["header"]
+    s.headers.update({
+        "User-Agent":      bucket["ua"],
+        "Accept-Language": "en-US,en;q=0.9",
+        "Origin":          BASE_URL,
+        "Referer":         BASE_URL + "/",
+        "token":           token,
+        hk:                hv,
+    })
+    return s
+
+class MetasoCore:
+    def __init__(self, headless: bool = True):
+        self.headless = headless
+        self.token = None
+        self.sessions = []
+        self.exhausted = []
+        self.current = 0
+        self.conv_ids = []
+        self.parent_ids = []
+        self._init_client()
+
+    def _init_client(self):
+        self.token = grab_token(headless=self.headless)
+        self.sessions = [make_session(self.token, b) for b in BUCKETS]
+        self.exhausted = [False] * len(BUCKETS)
+        self.current = 0
+        cid = new_conv_id()
+        pid = str(int(cid) - 1)
+        self.conv_ids = [cid] * len(BUCKETS)
+        self.parent_ids = [pid] * len(BUCKETS)
+
+    def _rotate(self):
+        for i in range(len(BUCKETS)):
+            nxt = (self.current + 1 + i) % len(BUCKETS)
+            if not self.exhausted[nxt]:
+                return nxt
+        return -1
+
+    def stream_chat(self, prompt: str):
+        attempts = 0
+        while attempts < len(BUCKETS) * 2:
+            b = BUCKETS[self.current]
+            ses = self.sessions[self.current]
+            cid = self.conv_ids[self.current]
+            pid = self.parent_ids[self.current]
+
+            payload = {
+                "model": "metaso-qa-with-agent", "stream": True,
+                "messages": [{
+                    "id": f"temp-{uuid.uuid4()}", "key": f"temp-{uuid.uuid4()}",
+                    "conversationId": cid, "role": "user",
+                    "content": prompt, "markdownContent": prompt,
+                    "engineType": "", "filter": "all", "contentType": 0,
+                    "outputHtml": False, "mode": "detail",
+                    "model": "fast_thinking", "outputStyle": "normal",
+                    "parentId": pid,
+                }],
+                "engineType": "", "mode": "detail", "filter": "all",
+                "outputHtml": False, "outputStyle": "normal",
+                "darkMode": False, "outputLanguage": "English",
+                "htmlNoDisplayEnable": True, "displayContent": prompt,
+                "conversationId": cid, "parentMessageId": pid,
+                b["header"][0]: b["header"][1],
+                "token": self.token,
+            }
+
+            try:
+                r = ses.post(CHAT_EP, json=payload, stream=True, timeout=90)
+            except Exception as e:
+                print(f"[!] Network error: {e}")
+                attempts += 1
+                continue
+
+            if r.status_code != 200:
+                attempts += 1
+                continue
+
+            hit_429 = False
+            new_rid = None
+            
+            # Generator for streaming back to FastAPI
+            def event_generator():
+                nonlocal hit_429, new_rid
+                for raw in r.iter_lines(decode_unicode=True):
+                    if not raw: continue
+                    ds = raw[5:].strip() if raw.startswith("data:") else raw.strip()
+                    if ds == "[DONE]": break
+                    try:
+                        evt = json.loads(ds)
+                    except: continue
+                    
+                    t = evt.get("type", "")
+                    if t == "response_message_init":
+                        new_rid = evt.get("data", {}).get("id")
+                    elif t == "error":
+                        if evt.get("code") == 429:
+                            hit_429 = True
+                        break
+                    elif t in ("response_message", "message", "text", "chat"):
+                        c = evt.get("data", {}).get("content", "")
+                        if c: yield ("content", c)
+                    elif "choices" in evt:
+                        for ch in evt["choices"]:
+                            delta = ch.get("delta", {})
+                            rc = delta.get("reasoning_content", "")
+                            c = delta.get("content", "")
+                            if rc: yield ("reasoning", rc)
+                            if c:  yield ("content", c)
+            
+            # We must buffer the first chunk or peek to see if it's 429
+            # Since requests stream is blocking, we can yield from generator
+            # But wait, if we yield, we can't easily retry from the parent loop if 429 happens mid-stream.
+            # Usually 429 happens instantly. Let's process the generator.
+            
+            stream_started = False
+            for event_type, chunk in event_generator():
+                stream_started = True
+                yield (event_type, chunk)
+
+            if hit_429:
+                self.exhausted[self.current] = True
+                nxt = self._rotate()
+                if nxt == -1:
+                    print("[*] All buckets dry. Refreshing token...")
+                    try:
+                        self._init_client()
+                        attempts = 0
+                        continue
+                    except:
+                        yield ("error", "Rate limited and auto-refresh failed.")
+                        return
+                self.current = nxt
+                if stream_started:
+                    # Can't transparently retry if we already started sending chunks to user
+                    yield ("error", "\n[System: 429 mid-stream, please retry]")
+                    return
+                attempts += 1
+                continue
+
+            if new_rid:
+                self.parent_ids[self.current] = new_rid
+            return # success, exit loop
+
+        yield ("error", "Max retries exceeded.")
