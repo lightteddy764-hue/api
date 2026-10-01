@@ -1,4 +1,4 @@
-import json, time, uuid, sys, os
+import json, time, uuid, sys, os, gc
 import requests
 from playwright.sync_api import sync_playwright
 
@@ -38,14 +38,26 @@ def grab_token(headless: bool = True, timeout: int = 30) -> str:
                 '--disable-gpu',
                 '--single-process',
                 '--no-zygote',
+                '--disable-software-rasterizer',
+                '--disable-extensions',
+                '--js-flags=--max-old-space-size=128',
+                '--window-size=800,600',
             ]
         )
         ctx = browser.new_context(
             user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            viewport={"width": 1280, "height": 800}
+            viewport={"width": 800, "height": 600}
         )
         ctx.add_init_script("delete Object.getPrototypeOf(navigator).webdriver")
         page = ctx.new_page()
+
+        # Block heavy images, fonts, stylesheets, and media to save memory on Render Free tier
+        def block_assets(route):
+            if route.request.resource_type in ["image", "media", "font", "stylesheet"]:
+                route.abort()
+            else:
+                route.continue_()
+        page.route("**/*", block_assets)
 
         def on_req(req):
             if "/api/search/chat" in req.url and req.method == "POST":
@@ -94,6 +106,7 @@ def grab_token(headless: bool = True, timeout: int = 30) -> str:
                 break
             time.sleep(0.5)
         browser.close()
+        gc.collect()
 
     if "token" not in captured:
         raise RuntimeError("Failed to intercept token automatically.")
