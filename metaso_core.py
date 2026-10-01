@@ -58,15 +58,25 @@ def grab_token(headless: bool = True, timeout: int = 30) -> str:
 
         try:
             ta = page.locator("textarea").first
-            ta.click(timeout=5000)
-            time.sleep(0.3)
-            ta.fill("hello")
+            ta.click(timeout=10000)
             time.sleep(0.5)
-            btn = page.locator("button:has(svg)").last
-            if btn.count() > 0:
-                btn.click(timeout=3000)
-            else:
-                page.mouse.click(1074, 474)
+            ta.fill("test init query")
+            time.sleep(0.5)
+
+            # Try Enter key
+            page.keyboard.press("Enter")
+            time.sleep(0.5)
+
+            # Also try button click if not yet captured
+            if "token" not in captured:
+                btn = page.locator("button:has(svg)").last
+                if btn.count() > 0:
+                    try:
+                        btn.click(timeout=10000)
+                    except Exception:
+                        page.mouse.click(1074, 474)
+                else:
+                    page.mouse.click(1074, 474)
         except Exception as e:
             print(f"[!] Error interacting with page: {e}")
 
