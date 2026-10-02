@@ -4,6 +4,7 @@ import time
 import uuid
 import logging
 import threading
+import httpx
 from fastapi import FastAPI, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
@@ -17,7 +18,7 @@ from metaso_core import MetasoCore
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger("metaso_api")
 
-app = FastAPI(title="Metaso OpenAI Compatible API", version="1.1.0")
+app = FastAPI(title="Unified OpenAI-Compatible AI Gateway", version="1.2.0")
 
 # Enable CORS for browser-based clients (NextChat, LibreChat, OpenWebUI)
 app.add_middleware(
@@ -31,6 +32,14 @@ app.add_middleware(
 security = HTTPBearer()
 
 API_KEY = os.getenv("API_KEY", "sk-metaso-eni-lo-forever-2026")
+AICHA_WORKER_URL = os.getenv("AICHA_WORKER_URL", "https://ucchat.freeai-chat.workers.dev/v1/chat/completions")
+
+AICHA_MODELS = {
+    "uncensored-v3", "deepseek-chat", "gpt-4o", "gpt-4o-mini", "gpt-4.1",
+    "gpt-4.1-mini", "gpt-5", "gpt-5-nano", "kimi-k2", "qwen3.7-plus",
+    "pi", "perplexity"
+}
+
 core_client = None
 client_lock = threading.Lock()
 
@@ -58,7 +67,6 @@ class ChatRequest(BaseModel):
     temperature: Optional[float] = None
     max_tokens: Optional[int] = None
 
-
 def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
     """Format conversation turns to preserve multi-turn context."""
     if not messages:
@@ -83,8 +91,8 @@ def format_messages_to_prompt(messages: List[Dict[str, Any]]) -> str:
 def health_check():
     return {
         "status": "ok",
-        "service": "Metaso OpenAI Wrapper",
-        "version": "1.1.0"
+        "service": "Unified AI Gateway (Metaso + AI Chat Kit)",
+        "version": "1.2.0"
     }
 
 @app.get("/v1/models")
@@ -93,8 +101,16 @@ def list_models():
     """Returns available models for OpenAI-compatible frontends."""
     models = [
         {"id": "metaso-qa-with-agent", "object": "model", "created": 1700000000, "owned_by": "metaso"},
+        {"id": "uncensored-v3", "object": "model", "created": 1700000000, "owned_by": "uncensored"},
+        {"id": "deepseek-chat", "object": "model", "created": 1700000000, "owned_by": "deepseek"},
         {"id": "gpt-4o", "object": "model", "created": 1700000000, "owned_by": "openai"},
-        {"id": "gpt-3.5-turbo", "object": "model", "created": 1700000000, "owned_by": "openai"},
+        {"id": "gpt-4o-mini", "object": "model", "created": 1700000000, "owned_by": "openai"},
+        {"id": "gpt-4.1", "object": "model", "created": 1700000000, "owned_by": "openai"},
+        {"id": "gpt-5", "object": "model", "created": 1700000000, "owned_by": "openai"},
+        {"id": "kimi-k2", "object": "model", "created": 1700000000, "owned_by": "moonshot"},
+        {"id": "qwen3.7-plus", "object": "model", "created": 1700000000, "owned_by": "alibaba"},
+        {"id": "pi", "object": "model", "created": 1700000000, "owned_by": "inflection"},
+        {"id": "perplexity", "object": "model", "created": 1700000000, "owned_by": "perplexity"},
         {"id": "claude-3-5-sonnet", "object": "model", "created": 1700000000, "owned_by": "anthropic"}
     ]
     return {
@@ -104,6 +120,63 @@ def list_models():
 
 @app.post("/v1/chat/completions")
 async def chat_completions(req: ChatRequest, auth=Depends(verify_api_key)):
+    model_name = req.model.lower().strip()
+
+    # ROUTE 1: AI Chat Kit Models (uncensored-v3, deepseek, gpt-4o, qwen, pi, perplexity, etc.)
+    if model_name in AICHA_MODELS:
+        payload = req.dict()
+        payload["model"] = model_name
+
+        if req.stream:
+            async def forward_stream():
+                chat_id = f"chatcmpl-{uuid.uuid4()}"
+                try:
+                    timeout_config = httpx.Timeout(120.0, connect=15.0)
+                    async with httpx.AsyncClient(timeout=timeout_config) as http_client:
+                        async with http_client.stream("POST", AICHA_WORKER_URL, json=payload) as resp:
+                            if resp.status_code != 200:
+                                err_text = await resp.aread()
+                                err_chunk = {
+                                    "id": chat_id,
+                                    "object": "chat.completion.chunk",
+                                    "created": int(time.time()),
+                                    "model": req.model,
+                                    "choices": [{"index": 0, "delta": {"content": f"\n\n[Upstream Error: {err_text.decode('utf-8', errors='ignore')[:300]}]"}, "finish_reason": "error"}]
+                                }
+                                yield f"data: {json.dumps(err_chunk)}\n\n".encode("utf-8")
+                                yield b"data: [DONE]\n\n"
+                                return
+
+                            async for chunk in resp.aiter_bytes():
+                                yield chunk
+                except Exception as e:
+                    logger.error(f"Error forwarding stream: {e}")
+                    err_chunk = {
+                        "id": chat_id,
+                        "object": "chat.completion.chunk",
+                        "created": int(time.time()),
+                        "model": req.model,
+                        "choices": [{"index": 0, "delta": {"content": f"\n\n[Gateway Connection Error: {str(e)}]"}, "finish_reason": "error"}]
+                    }
+                    yield f"data: {json.dumps(err_chunk)}\n\n".encode("utf-8")
+                    yield b"data: [DONE]\n\n"
+
+            return StreamingResponse(forward_stream(), media_type="text/event-stream")
+
+        # Non-streaming forward
+        try:
+            timeout_config = httpx.Timeout(120.0, connect=15.0)
+            async with httpx.AsyncClient(timeout=timeout_config) as http_client:
+                resp = await http_client.post(AICHA_WORKER_URL, json=payload)
+                if resp.status_code != 200:
+                    raise HTTPException(status_code=resp.status_code, detail=f"Upstream provider error: {resp.text[:300]}")
+                return resp.json()
+        except HTTPException:
+            raise
+        except Exception as e:
+            raise HTTPException(status_code=502, detail=f"Gateway routing error: {str(e)}")
+
+    # ROUTE 2: Metaso Deep Thinking Search Model (Default / metaso-qa-with-agent)
     client = await run_in_threadpool(get_client_sync)
     prompt = format_messages_to_prompt(req.messages)
 
